@@ -1,6 +1,7 @@
 """
 This file implements the REINFORCE algorithm on the CartPole environment.
-This code was obtained from
+This starter code was obtained from https://towardsdatascience.com/learning-reinforcement-learning-reinforce-with-pytorch-5e8ad7fc7da0
+We modified it significantly toenable parallel training of actors.
 """
 
 import numpy as np
