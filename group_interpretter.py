@@ -1,5 +1,5 @@
 """
-This file contains the implementation of the Learn by Watching Algorithm applied to
+This file contains the implementation of the Group Interpreter Algorithm applied to
 the Cartpole environment.
 
 Implementation details:
@@ -70,6 +70,12 @@ class Actor(Process):
         self.paramsRecieved = 0
         self.ne=TOTAL_NUM_EPISODES
 
+        self.policy_estimator = pe
+        self.groupAction = 0
+        self.action_probs = 0
+        self.performance = 1
+        self.total_rewards = []
+
     def run(self):
         # Main run loop for the process
         while(self.keepRunning == True):
@@ -78,8 +84,9 @@ class Actor(Process):
             self.pollLearners()
 
 
-    def print(self, inputMessage, message2 = ''):
-        print("learner{}:".format(self.id), inputMessage, message2)
+    def print(self, inputMessage, message2 = '', message3 = '', inID = ""):
+        if inID == self.id or "":
+            print("\nlearner{}:".format(self.id), inputMessage, message2, message3)
 
     def inquire(self, message):
         """
@@ -106,13 +113,16 @@ class Actor(Process):
             elif command == "rewards\n":
                 rewards = self.reinforce(env, pe, ne=self.ne)
                 self.leaderChannel.send([self.id ,rewards])
+            elif command == "inquireRewards":
+                self.print("sendingRewards")
+                self.leaderChannel.send([self.id ,self.total_rewards])
             else:
                 try:
                     exec(command)
                 except:
                     print("there is an error with that python command")
 
-    def pollLearners(self):
+    def pollLearners(self, variables = ""):
         """
         This will handle the inquires sent by each learner
         Both sending response and handling incoming responses are hangled here
@@ -128,6 +138,12 @@ class Actor(Process):
                     self.deltaParams = [a+b for (a,b) in zip(self.deltaParams,message[1])]
                     self.paramsRecieved = self.paramsRecieved +1
 
+                if message[0] == "inquireAction":
+                    channel.send(["respondAction", np.random.choice(message[1], p=self.action_probs)*self.performance])
+                if message[0] == "respondAction":
+                    self.groupAction += message[1]
+                    self.paramsRecieved += 1
+
 
     def reinforce(self, env, policy_estimator, ne=100,batch_size=10, gamma=0.99):
         # print("running reinforce")
@@ -139,11 +155,12 @@ class Actor(Process):
         batch_counter = 1
 
         # Define optimizer
-        optimizer = optim.Adam(policy_estimator.network.parameters(), lr=ADAM_OPTIMIZER_LR)
+        optimizer = optim.Adam(self.policy_estimator.network.parameters(), lr=ADAM_OPTIMIZER_LR)
 
         #For the Cartpole problem, action_space.n is 2
         action_space = np.arange(env.action_space.n)
         for ep in range(ne):
+            self.pollLeader()
             s_0 = env.reset()       #Reset the environment and get starting state
             states = []
             rewards = []
@@ -151,10 +168,28 @@ class Actor(Process):
             complete = False        #Keeps track of whether the episode has completed running
             while complete == False:
                 # Get actions and remove its connection to the DCG and convert it to numpy array
-                action_probs = policy_estimator.predict(s_0).detach().numpy()
+                self.action_probs = self.policy_estimator.predict(s_0).detach().numpy()
 
                 #Randomly select an action given the probabiities for each action
-                action = np.random.choice(action_space, p=action_probs)
+                action = np.random.choice(action_space, p=self.action_probs)
+
+                # Inquire group to determine what action this learner should take
+                for channel in self.channels:
+                    channel.send(["inquireAction", action_space])
+                self.groupAction = action*0
+                self.paramsRecieved = 0
+
+                # wait until all learners have responded
+                while(self.paramsRecieved<len(self.channels)):
+                    self.pollLearners()
+                    self.pollLeader()
+                # self.print(self.performance, inID = 1)
+                gamma = .9 + .1/(1+abs(self.groupAction - action))
+
+                # if self.id == 1:
+                #     gamma = .99
+                # self.print(gamma, inID = 1)
+
 
                 #Perform the action and get the next state and reward
                 s_1, r, complete, _ = env.step(action)
@@ -173,7 +208,7 @@ class Actor(Process):
                     batch_states.extend(states)
                     batch_actions.extend(actions)
                     batch_counter += 1
-                    total_rewards.append(sum(rewards))
+                    self.total_rewards.append(sum(rewards))
 
                     # If batch is complete, update network
                     if batch_counter == batch_size:
@@ -187,60 +222,28 @@ class Actor(Process):
 
                         # Calculate loss
                         logprob = torch.log(
-                            policy_estimator.predict(state_tensor))
+                            self.policy_estimator.predict(state_tensor))
                         selected_logprobs = reward_tensor * \
                             logprob[np.arange(len(action_tensor)), action_tensor]
                         loss = -selected_logprobs.mean()
 
                         # Calculate gradients
                         loss.backward()
-
-                        #Obtain the gradients before and after the backpropogation step
-                        startParams = copy.deepcopy(list(policy_estimator.network.parameters()))
                         optimizer.step()
-                        endParams = list(policy_estimator.network.parameters())
-
-                        #Compute the change in gradients
-                        deltaParams = [ s.detach()-e.detach() for (s,e) in zip(startParams,endParams) ]
-
-                        #Broadcast this latest parameters to the remaining learners
-                        for channel in self.channels:
-                            channel.send(["deltaParams", deltaParams])
-
-                        #Wait till we receive parameters from every other learner
-                        while(self.paramsRecieved<len(self.channels)):
-
-                            #Get the latest deltaParams from all other learners
-                            self.pollLearners()
-
-                        p = policy_estimator.network.parameters()
-                        # print("\np\n", list(p))
-                        for (l, i) in zip(p,self.deltaParams):
-                            # if self.id == 1:
-                                # print("l, i were\n", l.data, i)
-                            # l.data = l.data *1.1
-                            l.data += i
-                            # if self.id == 1:
-                                # print("l is now\n", l.data)
-                        # print("\nlist of p\n", list(policy_estimator.network.parameters()))
-
-                        optimizer = optim.Adam(policy_estimator.network.parameters(), lr=ADAM_OPTIMIZER_LR)
-
-                        self.deltaParams = self.zeroParams
-                        self.paramsRecieved = 0
 
                         #Reset all batch arrays
                         batch_rewards = []
                         batch_actions = []
                         batch_states = []
                         batch_counter = 1
+                        self.performance = np.mean(self.total_rewards[-10:])
 
                     # Print running average
                     # print(ep)
                     if self.id == 1:
-                        print("\rEp: {} Average of last 10: {:.2f}".format(ep + 1, np.mean(total_rewards[-10:])), end="")
+                        print("\rEp: {} Average of last 10: {:.2f}".format(ep + 1, np.mean(self.total_rewards[-10:])), end="")
 
-        return total_rewards
+        return self.total_rewards
 
 def get_input(stdin, channels, n):
     """
@@ -250,7 +253,18 @@ def get_input(stdin, channels, n):
     :param n: total number of actors
     :return:
     """
+
+    global show
+    show = False
+
     for line in iter(stdin.readline, ''):
+        if line == "show\n":
+            print("", "Show Toggled", show)
+            if show == True:
+                show = False
+            elif show == False:
+                show = True
+            print(show)
         if line == "poll\n":
             #Plot results for each actor
             plt.figure(figsize=(12,8))
@@ -265,6 +279,22 @@ def get_input(stdin, channels, n):
                     plt.ylabel('Total Rewards')
                     plt.xlabel('Episodes')
             plt.show()
+        elif line == "plot\n":
+            plt.figure(figsize = (12,8))
+            plt.plot()
+            for channel in channels:
+                channel.send("inquireRewards")
+            for channel in channels:
+                check = channel.poll(5)
+                print(check)
+                if(check):
+                    message = channel.recv()
+                    rewards = message[1]
+                    if show == True:
+                        plt.plot(rewards, label = str(message[0]))
+                    window = 10
+                    smoothed_rewards = [np.mean(rewards[i-window:i+1]) if i > window else np.mean(rewards[:i+1]) for i in range(len(rewards))]
+                    plt.plot(smoothed_rewards, label = str(message[0])+ "smoothed" )
         else:
             #Send command to each learner
             for channel in channels:
@@ -280,15 +310,15 @@ def get_input(stdin, channels, n):
 env = gym.make('CartPole-v0')
 s = env.reset()
 
-#Initialize policy estimator nentwork and define neural network architecture 
+#Initialize policy estimator nentwork and define neural network architecture
 pe = policy_estimator(env)
-    
+
 if __name__ == '__main__':
     # #Initialize Cartpole Gym environment
     # env = gym.make('CartPole-v0')
-    
-    
-    # #Initialize policy estimator nentwork and define neural network architecture 
+
+
+    # #Initialize policy estimator nentwork and define neural network architecture
     # pe = policy_estimator(env)
 
     n = NUM_LEARNERS                                   #Number of learners
