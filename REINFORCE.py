@@ -1,7 +1,7 @@
 """
 This file implements the REINFORCE algorithm on the CartPole environment.
 This starter code was obtained from https://towardsdatascience.com/learning-reinforcement-learning-reinforce-with-pytorch-5e8ad7fc7da0
-We modified it significantly toenable parallel training of actors.
+We modified it significantly to enable parallel training of actors.
 """
 
 import numpy as np
@@ -51,7 +51,7 @@ class policy_estimator():
 
 v = 0
 def reinforce(env, policy_estimator, num_episodes=1000,
-              batch_size=10, gamma=0.99):
+              batch_size=10, gamma=0.8):
 
     # Set up lists to hold results
     total_rewards = []

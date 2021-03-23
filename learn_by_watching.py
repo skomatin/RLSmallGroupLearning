@@ -69,6 +69,7 @@ class Actor(Process):
         self.deltaParams = self.zeroParams       #Initialize delta parameters to 0
         self.paramsRecieved = 0
         self.ne=TOTAL_NUM_EPISODES
+        self.score = 0
 
     def run(self):
         # Main run loop for the process
@@ -125,7 +126,8 @@ class Actor(Process):
 
                 # deltaParams: adds the self.deltaParams. This is to be used in the Learn by Watching Method
                 if message[0] == "deltaParams":
-                    self.deltaParams = [a+b for (a,b) in zip(self.deltaParams,message[1])]
+                    if message[2] > self.score:
+                        self.deltaParams = [a+b*(message[2]-self.score)/20 for (a,b) in zip(self.deltaParams,message[1])]
                     self.paramsRecieved = self.paramsRecieved +1
 
 
@@ -174,6 +176,7 @@ class Actor(Process):
                     batch_actions.extend(actions)
                     batch_counter += 1
                     total_rewards.append(sum(rewards))
+                    self.score = np.mean(total_rewards[-10:])
 
                     # If batch is complete, update network
                     if batch_counter == batch_size:
@@ -205,7 +208,7 @@ class Actor(Process):
 
                         #Broadcast this latest parameters to the remaining learners
                         for channel in self.channels:
-                            channel.send(["deltaParams", deltaParams])
+                            channel.send(["deltaParams", deltaParams, self.score])
 
                         #Wait till we receive parameters from every other learner
                         while(self.paramsRecieved<len(self.channels)):
@@ -311,6 +314,7 @@ if __name__ == '__main__':
     print("type 'rewards' to start the process")
     print("'quit' at any time to terminated the script")
     print("other inputs will be run as python code by each actor")
+    print("when the process is over you can type poll to see the results")
 
     #Allow user's command to control the program
     get_input(sys.stdin, pipeArr[0], n-1)
